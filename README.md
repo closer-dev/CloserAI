@@ -1,3 +1,6 @@
+# CloserAI
+This is an applied solution for business which you can us to automate your business process.
+
 # Structure of project
 
 ```
