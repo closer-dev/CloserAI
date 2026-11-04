@@ -47,6 +47,7 @@ B2B SaaS: Telegram-бот техподдержки для малого бизн�
 | Логи | `log/slog` (stdlib) | — |
 | Auth | `golang-jwt/jwt/v5` + `golang.org/x/crypto/bcrypt` | JWT в httpOnly cookie |
 | Шифрование токенов ботов | `crypto/aes` (AES-GCM, stdlib) | — |
+| Почта | `net/smtp` (stdlib) | письма с кодами подтверждения; в dev письма пишутся в лог |
 | Парсинг документов | `ledongthuc/pdf`; txt/md встроенными средствами | DOCX можно добавить позже |
 | Тесты | `stretchr/testify` + `testcontainers-go` | интеграционные тесты с реальным Postgres |
 
@@ -76,8 +77,8 @@ B2B SaaS: Telegram-бот техподдержки для малого бизн�
 closerai/
 ├── cmd/app/main.go            # сборка зависимостей и запуск всего
 ├── internal/
-│   ├── platform/              # общее: config, db, logger, crypto, eventbus, httpx
-│   ├── auth/                  # вход, JWT, middleware, роли
+│   ├── platform/              # общее: config, db, logger, crypto, eventbus, httpx, mailer
+│   ├── auth/                  # вход, JWT, middleware, роли, подтверждение email
 │   ├── tenant/                # компании-клиенты, тарифы
 │   ├── bot/                   # подключение токена бота, установка вебхука, настройки
 │   ├── telegram/              # приём апдейтов, отправка сообщений
@@ -109,7 +110,10 @@ closerai/
 
 ```sql
 tenants        (id, name, plan, created_at)
-users          (id, tenant_id, email, password_hash, role[owner|operator], name)
+users          (id, tenant_id, email, password_hash, role[owner|operator], name,
+                email_verified_at NULL)
+email_codes    (id, user_id, purpose[verify_email], code_hash, attempts,
+                expires_at, created_at)  -- одноразовые коды, хранится только HMAC
 bots           (id, tenant_id, tg_bot_id, username, token_enc, webhook_secret,
                 system_prompt, greeting, handoff_threshold, is_active)
 customers      (id, tenant_id, tg_user_id, username, first_name, last_name)
@@ -129,6 +133,14 @@ verdicts       (id, conversation_id, resolved bool,
 ```
 
 ## 5. Ключевые процессы
+
+### 5.0 Подтверждение email
+1. При регистрации (и при первом входе сотрудника, которого добавил владелец) создаётся код из 6 цифр и отправляется на почту. В базе хранится только HMAC-SHA256 кода.
+2. Пользователь сразу получает сессию, но пока email не подтверждён, ему доступны только `GET /api/me`, `POST /api/auth/verify`, `POST /api/auth/resend` и `logout`. Остальной API отвечает 403, панель показывает экран ввода кода.
+3. Код живёт 15 минут, даёт 5 попыток (счётчик увеличивается атомарно, до сравнения), повторная отправка — не чаще раза в 60 секунд. Новый код отменяет старые.
+4. После подтверждения выставляется `users.email_verified_at` и выдаётся новый JWT с отметкой о подтверждении.
+
+Отправка идёт через интерфейс `mailer.Sender`: SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) или, если `SMTP_HOST` пуст, вывод письма в лог — для разработки SMTP не нужен. Тот же `mailer` потом используется для приглашений операторов и сброса пароля.
 
 ### 5.1 Подключение бота владельцем бизнеса
 1. Владелец создаёт бота у @BotFather и вставляет токен в панель.
@@ -174,6 +186,7 @@ verdicts       (id, conversation_id, resolved bool,
 ## 6. API (основное)
 ```
 POST   /api/auth/register | login | logout        GET /api/me
+POST   /api/auth/verify | resend                 # подтверждение email кодом
 GET    /api/bots           POST /api/bots          PATCH/DELETE /api/bots/:id
 GET    /api/documents      POST /api/documents (multipart)   DELETE /api/documents/:id
 POST   /api/rag/test       # «песочница»: задать вопрос и увидеть ответ и найденные чанки
@@ -201,6 +214,7 @@ GET    /healthz
 |---|---|---|---|
 | 0 | Каркас | репозиторий, Docker Compose (app+pg+ollama), goose, sqlc, конфиг, healthz, Vite-проект, встраивание статики | 3–4 дня |
 | 1 | Auth и tenants | регистрация, JWT, роли, middleware для `tenant_id`, страница входа | 3–4 дня |
+| 1.5 | Подтверждение email | `mailer` (SMTP / лог), коды подтверждения, ограничение попыток, экран ввода кода | 1–2 дня |
 | 2 | Telegram | подключение бота, вебхук или polling, сохранение клиентов и сообщений, эхо-ответ | 3–4 дня |
 | 3 | База знаний | загрузка документов, river-задачи, чанкинг, эмбеддинги, pgvector, UI базы знаний | 5–6 дней |
 | 4 | RAG-ответы | поиск, промпт, генерация, источники, песочница | 4–5 дней |

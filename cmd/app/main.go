@@ -7,16 +7,22 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"closerai/internal/auth"
 	"closerai/internal/platform/config"
 	"closerai/internal/platform/db"
 	"closerai/internal/platform/httpx"
 	"closerai/internal/platform/logger"
+	"closerai/internal/platform/mailer"
+	"closerai/internal/tenant"
 	"closerai/web"
 )
 
@@ -48,9 +54,14 @@ func run() error {
 		return err
 	}
 
+	mail, err := newMailer(cfg)
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           newRouter(cfg, pool),
+		Handler:           newRouter(cfg, pool, mail),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -74,7 +85,7 @@ func run() error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-func newRouter(cfg config.Config, pool *pgxpool.Pool) *gin.Engine {
+func newRouter(cfg config.Config, pool *pgxpool.Pool, mail mailer.Sender) *gin.Engine {
 	if !cfg.IsDev() {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -89,9 +100,34 @@ func newRouter(cfg config.Config, pool *pgxpool.Pool) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	// Сборка модулей. Модули общаются через сервисы, а не через чужие таблицы.
+	tenantSvc := tenant.NewService(pool)
+	authSvc := auth.NewService(pool, func(ctx context.Context, tx pgx.Tx, name string) (uuid.UUID, error) {
+		t, err := tenantSvc.CreateTx(ctx, tx, name)
+		return t.ID, err
+	}, cfg.JWTSecret, mail)
+	authMod := auth.NewModule(authSvc, strings.HasPrefix(cfg.PublicURL, "https://"))
+
 	api := r.Group("/api")
-	_ = api // сюда модули регистрируют свои маршруты: auth.Routes(api), bot.Routes(api), ...
+	authMod.Routes(api) // /auth/* публичные, остальное auth-модуль защищает сам
+
+	// Всё, что ниже, доступно только авторизованным; tenant_id берётся из токена.
+	private := api.Group("", authMod.Middleware())
+	tenant.NewModule(tenantSvc).Routes(private)
 
 	r.NoRoute(httpx.SPA(web.Dist()))
 	return r
+}
+
+func newMailer(cfg config.Config) (mailer.Sender, error) {
+	if cfg.SMTPHost == "" {
+		if !cfg.IsDev() {
+			slog.Warn("SMTP_HOST не задан: письма с кодами не отправляются, а пишутся в лог")
+		}
+		return mailer.LogSender{}, nil
+	}
+	return mailer.NewSMTP(mailer.SMTPConfig{
+		Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser,
+		Password: cfg.SMTPPassword, From: cfg.SMTPFrom,
+	})
 }

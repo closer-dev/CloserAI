@@ -17,6 +17,13 @@ type Config struct {
 	JWTSecret     string `env:"JWT_SECRET,required"`
 	EncryptionKey string `env:"ENCRYPTION_KEY,required"` // base64, 32 байта (AES-256)
 
+	// Почта. Если SMTP_HOST пуст, письма не отправляются, а пишутся в лог (для разработки).
+	SMTPHost     string `env:"SMTP_HOST"`
+	SMTPPort     int    `env:"SMTP_PORT" envDefault:"587"`
+	SMTPUser     string `env:"SMTP_USER"`
+	SMTPPassword string `env:"SMTP_PASSWORD"`
+	SMTPFrom     string `env:"SMTP_FROM" envDefault:"CloserAI <noreply@localhost>"`
+
 	TelegramMode string `env:"TG_MODE" envDefault:"webhook"` // webhook | polling
 
 	OllamaURL     string `env:"OLLAMA_URL" envDefault:"http://localhost:11434"`

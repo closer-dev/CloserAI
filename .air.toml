@@ -1,0 +1,13 @@
+# Горячая перезагрузка Go-сервера: make dev-api-watch (нужен github.com/air-verse/air)
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/app ./cmd/app"
+  entrypoint = ["./tmp/app"]
+  include_ext = ["go", "sql"]
+  exclude_dir = ["web", "tmp", "bin", "deploy"]
+  delay = 500
+
+[log]
+  time = false
