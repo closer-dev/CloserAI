@@ -4,7 +4,7 @@ This is an applied solution for business which you can use to automate your busi
 
 ---
 
-> [!IMPORTANT]
+> [!WARNING]
 > This product is in development now
 
 ---
