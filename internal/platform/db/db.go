@@ -6,15 +6,31 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
+	pgxvec "github.com/pgvector/pgvector-go/pgx"
 	"github.com/pressly/goose/v3"
 
 	"closerai/db/migrations"
 )
 
 func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, fmt.Errorf("db: parse config: %w", err)
+	}
+	if err := ensureVectorExtension(ctx, cfg.ConnConfig); err != nil {
+		return nil, err
+	}
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if err := pgxvec.RegisterTypes(ctx, conn); err != nil {
+			return fmt.Errorf("db: register vector types: %w", err)
+		}
+		return nil
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("db: connect: %w", err)
 	}
@@ -23,6 +39,19 @@ func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("db: ping: %w", err)
 	}
 	return pool, nil
+}
+
+func ensureVectorExtension(ctx context.Context, cfg *pgx.ConnConfig) error {
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("db: connect for vector extension: %w", err)
+	}
+	defer conn.Close(context.Background())
+
+	if _, err := conn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
+		return fmt.Errorf("db: create vector extension: %w", err)
+	}
+	return nil
 }
 
 // Migrate применяет встроенные в бинарник goose-миграции из db/migrations.

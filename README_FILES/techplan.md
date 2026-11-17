@@ -71,13 +71,14 @@ B2B SaaS: Telegram-бот техподдержки для малого бизн�
 
 ## 3. Структура репозитория
 
-Код разбит по функциональным модулям, а не по техническим слоям. Новая фича — это новая папка в `internal/`.
+Код разбит по ограниченным контекстам (DDD), а внутри каждого — по слоям `domain` / `app` / `infra` / `api`. Новая фича — это новый контекст в `internal/`. Подробно: [Архитектура DDD](Архитектура%20DDD.md).
 
 ```
 closerai/
 ├── cmd/app/main.go            # сборка зависимостей и запуск всего
 ├── internal/
-│   ├── platform/              # общее: config, db, logger, crypto, eventbus, httpx, mailer
+│   ├── kernel/                # shared kernel: Identity, Role
+│   ├── platform/              # общее: config, db (+TxManager), logger, crypto, eventbus, httpx, mailer
 │   ├── auth/                  # вход, JWT, middleware, роли, подтверждение email
 │   ├── tenant/                # компании-клиенты, тарифы
 │   ├── bot/                   # подключение токена бота, установка вебхука, настройки
@@ -88,10 +89,10 @@ closerai/
 │   ├── llm/                   # интерфейс Provider + реализация для Ollama
 │   ├── verdict/               # итоговая оценка диалога
 │   └── realtime/              # SSE-хаб для операторов
-│   # в каждом модуле: handler.go, service.go, repo.go (sqlc), routes.go
+│   ├── archtest/              # тест, который следит за правилами слоёв
+│   # в каждом контексте: module.go, domain/, app/, infra/postgres/{queries,sqlcgen}, api/
 ├── db/
-│   ├── migrations/            # goose *.sql (встраиваются в бинарник)
-│   └── queries/               # *.sql для sqlc
+│   └── migrations/            # goose *.sql (встраиваются в бинарник); запросы sqlc — в контекстах
 ├── web/                       # React-приложение (Vite)
 ├── deploy/                    # docker-compose.yml
 ├── Dockerfile
@@ -100,8 +101,8 @@ closerai/
 ```
 
 **Правила, которые упрощают добавление фич:**
-1. Модуль регистрирует свои маршруты сам: `func (m *Module) Routes(r *gin.RouterGroup)`.
-2. Модули не обращаются к таблицам друг друга, только к сервисам через интерфейсы.
+1. Контекст регистрирует свои маршруты сам: `func (h *Handler) Routes(r *gin.RouterGroup)` в слое `api`.
+2. Контексты не обращаются к таблицам и пакетам друг друга, только к сервисам через порты, которые связываются в `main.go`. Слой `domain` не зависит ни от чего, кроме `kernel`.
 3. Внутренняя шина событий (`platform/eventbus`) рассылает события `MessageCreated`, `ConversationStatusChanged`, `ConversationClosed`. На них подписываются realtime-хаб, модуль вердиктов, а в будущем аналитика, уведомления или CRM-интеграции, и ядро при этом не меняется.
 
 ## 4. Схема БД (основные таблицы)

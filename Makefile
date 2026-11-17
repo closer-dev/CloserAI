@@ -50,7 +50,7 @@ down: ## Остановить всё
 logs: ## Логи приложения
 	$(COMPOSE) logs -f app
 
-sqlc: ## Сгенерировать Go-код из db/queries
+sqlc: ## Сгенерировать Go-код sqlc для всех контекстов (internal/*/infra/postgres)
 	docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR):/src" -w /src sqlc/sqlc generate
 	go mod tidy
 

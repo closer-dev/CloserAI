@@ -1,12 +1,16 @@
 version: "2"
+
+# Каждый ограниченный контекст владеет своими запросами и своим сгенерированным
+# пакетом в infra/postgres. Схема одна на всех (goose-миграции в db/migrations).
+# Новый контекст = новый блок в sql; общие настройки go берутся якорем &go.
 sql:
   - engine: postgresql
     schema: db/migrations
-    queries: db/queries
+    queries: internal/auth/infra/postgres/queries
     gen:
-      go:
-        package: store
-        out: internal/platform/db/store
+      go: &go
+        package: sqlcgen
+        out: internal/auth/infra/postgres/sqlcgen
         sql_package: pgx/v5
         emit_interface: true
         emit_empty_slices: true
@@ -26,3 +30,11 @@ sql:
               import: time
               type: Time
               pointer: true
+
+  - engine: postgresql
+    schema: db/migrations
+    queries: internal/tenant/infra/postgres/queries
+    gen:
+      go:
+        <<: *go
+        out: internal/tenant/infra/postgres/sqlcgen
