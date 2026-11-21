@@ -1,0 +1,21 @@
+cat << 'EOF' > deploy/Caddyfile
+{$DOMAIN:localhost} {
+    # Сжатие трафика
+    encode gzip zstd
+
+    # Базовая защита заголовками
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+
+    # Проксирование всех запросов на Go-приложение
+    reverse_proxy app:8080 {
+        health_uri /healthz
+        health_interval 10s
+        health_timeout 3s
+    }
+}
+EOF
+

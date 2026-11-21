@@ -1,0 +1,55 @@
+mkdir -p .github/workflows && cat << 'EOF' > .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  check:
+    name: Lint, Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Check sqlc generated code is up-to-date
+        run: |
+          go install ://github.com
+          sqlc generate
+          git diff --exit-code
+
+      - name: Run Go tests & vet
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Install & check frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Test Docker image build
+        run: docker build -t closerai:ci .
+EOF
+
