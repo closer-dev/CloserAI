@@ -3,6 +3,7 @@
 //   - domain не зависит ни от чего, кроме kernel и стандартной библиотеки
 //     (плюс uuid): ни HTTP, ни БД, ни других слоёв, ни других контекстов;
 //   - app зависит только от своего domain, kernel и стандартной библиотеки;
+//   - kernel зависит только от uuid и стандартной библиотеки;
 //   - контексты не импортируют domain/app/infra чужих контекстов (исключение —
 //     api/FromContext, RequireRole из auth: это опубликованный HTTP-интерфейс).
 package archtest
@@ -103,4 +104,20 @@ func imports(t *testing.T, path string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+// TestKernel: общее ядро (типы и доменные события) не тянет за собой ни
+// инфраструктуру, ни контексты — иначе его нельзя импортировать из domain.
+func TestKernel(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "kernel", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		for _, imp := range imports(t, f) {
+			if (imp != "github.com/google/uuid" && strings.Contains(imp, ".")) || strings.HasPrefix(imp, "closerai/") {
+				t.Errorf("%s: импорт %q: kernel может зависеть только от uuid и стандартной библиотеки", f, imp)
+			}
+		}
+	}
 }

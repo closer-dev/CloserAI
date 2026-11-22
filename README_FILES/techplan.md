@@ -15,6 +15,8 @@ B2B SaaS: Telegram-бот техподдержки для малого бизн�
 - realtime-канал для операторов;
 - раздача собранного React-приложения через `embed.FS`, поэтому nginx не нужен.
 
+Внутри бинарника код разбит на **ограниченные контексты** (DDD): `auth`, `tenant`, `bot`, `telegram`, `conversation`, `knowledge`, `rag`, `verdict`, `realtime`. Каждый владеет своими таблицами и сценариями. Друг к другу контексты обращаются только через порты, которые связываются в `main.go`, и через доменные события. Общая техника без бизнес-логики (БД и транзакции, шина событий, очередь задач, LLM, почта) лежит в `internal/platform`. Подробно: [Архитектура DDD](Архитектура%20DDD.md).
+
 ```
 ┌──────────────┐   webhook    ┌─────────────────── app (Go, Gin) ───────────────────┐
 │  Telegram    │ ───────────▶ │  telegram ─▶ conversation ─▶ rag ─▶ llm (Ollama)    │
@@ -41,8 +43,9 @@ B2B SaaS: Telegram-бот техподдержки для малого бизн�
 | Векторы | `pgvector/pgvector-go` | тип `vector` для pgx |
 | Миграции | `pressly/goose` | SQL-файлы, запуск при старте приложения |
 | Telegram | `go-telegram/bot` | активно поддерживается, работает и с вебхуками, и с long polling |
-| LLM | `ollama/ollama/api` | официальный клиент |
-| Фоновые задачи | `riverqueue/river` | очередь прямо в Postgres, без Redis |
+| LLM | `ollama/ollama/api` | официальный клиент; обёрнут в `platform/llm` (порт `Provider`) |
+| Фоновые задачи | `riverqueue/river` | очередь прямо в Postgres, без Redis; обёрнута в `platform/jobs` |
+| События между контекстами | `platform/eventbus` (свой, в памяти) | доставка после коммита транзакции, без брокера |
 | Конфиг | `caarlos0/env` | настройки из переменных окружения |
 | Логи | `log/slog` (stdlib) | — |
 | Auth | `golang-jwt/jwt/v5` + `golang.org/x/crypto/bcrypt` | JWT в httpOnly cookie |
@@ -54,7 +57,7 @@ B2B SaaS: Telegram-бот техподдержки для малого бизн�
 ### Локальная модель ИИ (через Ollama)
 - **Чат:** `qwen2.5:3b-instruct` или более новая Qwen 3–4B. Это небольшие модели, которые прилично понимают русский и работают даже на CPU. Для самого слабого железа подойдёт `qwen2.5:1.5b`.
 - **Эмбеддинги:** `bge-m3`, хорошо справляется с несколькими языками, включая русский (вектор размерности 1024). Лёгкая альтернатива — `nomic-embed-text` (тогда поменять размерность в миграции).
-- Код работает с моделью только через интерфейс `llm.Provider` (`Chat`, `Embed`). Позже модель или провайдера можно заменить, не трогая остальной код.
+- Код работает с моделью только через интерфейс `platform/llm.Provider` (`Chat`, `Embed`), реализация — `platform/llm/ollama`. Контексты объявляют свои узкие порты (`Embedder`, `AnswerGenerator`…) и реализуют их в своём `infra` поверх `Provider`. Позже модель или провайдера можно заменить, не трогая контексты.
 
 ### Frontend
 - **Vite + React + TypeScript**
@@ -75,22 +78,27 @@ B2B SaaS: Telegram-бот техподдержки для малого бизн�
 
 ```
 closerai/
-├── cmd/app/main.go            # сборка зависимостей и запуск всего
+├── cmd/app/main.go            # composition root: платформа, сборка контекстов, запуск
 ├── internal/
-│   ├── kernel/                # shared kernel: Identity, Role
-│   ├── platform/              # общее: config, db (+TxManager), logger, crypto, eventbus, httpx, mailer
-│   ├── auth/                  # вход, JWT, middleware, роли, подтверждение email
+│   ├── kernel/                # shared kernel: Identity, Role, доменные события (kernel.Event)
+│   ├── platform/              # техника без бизнес-логики:
+│   │   ├── db/                #   pgx-пул, goose, TxManager (+ AfterCommit)
+│   │   ├── eventbus/          #   шина доменных событий
+│   │   ├── jobs/              #   очередь задач river
+│   │   ├── llm/               #   порт Provider + ollama/
+│   │   └── …                  #   config, logger, httpx, crypto, mailer
+│   │   # ограниченные контексты:
+│   ├── auth/                  # вход, JWT, middleware, роли, подтверждение email, сотрудники
 │   ├── tenant/                # компании-клиенты, тарифы
 │   ├── bot/                   # подключение токена бота, установка вебхука, настройки
 │   ├── telegram/              # приём апдейтов, отправка сообщений
-│   ├── conversation/          # диалоги, сообщения, статусы, передача оператору
-│   ├── knowledge/             # документы, чанкинг, индексация (river-задачи)
-│   ├── rag/                   # поиск контекста и сборка промпта
-│   ├── llm/                   # интерфейс Provider + реализация для Ollama
+│   ├── conversation/          # клиенты, диалоги, сообщения, статусы, передача оператору
+│   ├── knowledge/             # документы, чанкинг, индексация (river-задачи), поиск по чанкам
+│   ├── rag/                   # сборка промпта и ответ по найденному контексту
 │   ├── verdict/               # итоговая оценка диалога
-│   └── realtime/              # SSE-хаб для операторов
-│   ├── archtest/              # тест, который следит за правилами слоёв
-│   # в каждом контексте: module.go, domain/, app/, infra/postgres/{queries,sqlcgen}, api/
+│   ├── realtime/              # SSE-хаб для операторов
+│   └── archtest/              # тест, который следит за правилами слоёв
+│   # в каждом контексте: module.go, domain/, app/, infra/{postgres/{queries,sqlcgen},jobs,…}, api/
 ├── db/
 │   └── migrations/            # goose *.sql (встраиваются в бинарник); запросы sqlc — в контекстах
 ├── web/                       # React-приложение (Vite)
@@ -102,12 +110,27 @@ closerai/
 
 **Правила, которые упрощают добавление фич:**
 1. Контекст регистрирует свои маршруты сам: `func (h *Handler) Routes(r *gin.RouterGroup)` в слое `api`.
-2. Контексты не обращаются к таблицам и пакетам друг друга, только к сервисам через порты, которые связываются в `main.go`. Слой `domain` не зависит ни от чего, кроме `kernel`.
-3. Внутренняя шина событий (`platform/eventbus`) рассылает события `MessageCreated`, `ConversationStatusChanged`, `ConversationClosed`. На них подписываются realtime-хаб, модуль вердиктов, а в будущем аналитика, уведомления или CRM-интеграции, и ядро при этом не меняется.
+2. Контексты не обращаются к таблицам и пакетам друг друга, только к сервисам через порты, которые связываются в `main.go`. Слой `domain` не зависит ни от чего, кроме `kernel`; слой `app` — только от своего `domain` и `kernel`.
+3. Внутренняя шина событий (`platform/eventbus`) рассылает доменные события из `kernel`: `MessageCreated`, `ConversationStatusChanged`, `ConversationClosed`. Доставка — после коммита транзакции. На них подписываются realtime-хаб, модуль вердиктов, а в будущем аналитика, уведомления или CRM-интеграции, и ядро при этом не меняется.
+4. Долгая работа (индексация, вердикт, автозакрытие) — задачи river через `platform/jobs`. Задача ставится в той же транзакции, что и данные, и воркер вызывает сценарий из `app`.
+
+**Карта контекстов** (кто какими таблицами владеет и от кого зависит):
+
+| Контекст | Таблицы | Использует |
+|---|---|---|
+| `auth` | `users`, `email_codes` | `tenant` (создание компании при регистрации), mailer |
+| `tenant` | `tenants` | — |
+| `bot` | `bots` | Telegram API (`getMe`, `setWebhook`), crypto |
+| `telegram` | — | `bot` (токен, секрет вебхука), `conversation` (входящее сообщение) |
+| `conversation` | `customers`, `conversations`, `messages` | `rag` (ответ), `telegram` (отправка), события, jobs (автозакрытие) |
+| `knowledge` | `documents`, `chunks` | llm (`Embed`), jobs (индексация) |
+| `rag` | — | `knowledge` (гибридный поиск), llm (`Chat`, `Embed`) |
+| `verdict` | `verdicts` | событие `ConversationClosed`, `conversation` (история), llm (JSON-вывод), jobs |
+| `realtime` | — | все события, `auth` (кто подключён) |
 
 ## 4. Схема БД (основные таблицы)
 
-У каждой бизнес-таблицы есть колонка `tenant_id`, а каждый запрос фильтрует по ней (это изоляция данных разных компаний). Полная схема — в `db/migrations/00001_init.sql`.
+У каждой бизнес-таблицы есть колонка `tenant_id`, а каждый запрос фильтрует по ней (это изоляция данных разных компаний). Полная схема — в `db/migrations/00001_init.sql`. Схема общая, но у каждой таблицы один контекст-владелец (см. карту контекстов в разделе 3): только он пишет в неё sqlc-запросы.
 
 ```sql
 tenants        (id, name, plan, created_at)
@@ -130,7 +153,8 @@ chunks         (id, tenant_id, document_id, content, embedding vector(1024),
 verdicts       (id, conversation_id, resolved bool,
                 category, sentiment[positive|neutral|negative],
                 summary text, needs_followup bool, raw JSONB, created_at)
--- + служебные таблицы river
+-- + служебные таблицы river (river_job, river_queue, …): их создаёт
+--   platform/jobs.Migrate при старте, в goose-миграциях их нет
 ```
 
 ## 5. Ключевые процессы
@@ -144,31 +168,36 @@ verdicts       (id, conversation_id, resolved bool,
 Отправка идёт через интерфейс `mailer.Sender`: SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) или, если `SMTP_HOST` пуст, вывод письма в лог — для разработки SMTP не нужен. Тот же `mailer` потом используется для приглашений операторов и сброса пароля.
 
 ### 5.1 Подключение бота владельцем бизнеса
-1. Владелец создаёт бота у @BotFather и вставляет токен в панель.
-2. Backend проверяет токен (`getMe`), шифрует его AES-GCM и сохраняет.
-3. Backend вызывает `setWebhook` с адресом `https://host/tg/webhook/{bot_id}` и `secret_token`. Входящие вебхуки проверяются по заголовку `X-Telegram-Bot-Api-Secret-Token`.
+Контекст `bot`. Токены ботов **не хранятся в `.env`**: у каждой компании свой бот, токен — её данные.
 
-Один процесс обслуживает сколько угодно ботов. Для локальной разработки есть режим long polling (`TG_MODE=polling`).
+1. Владелец создаёт бота у @BotFather и вставляет токен в панель (`POST /api/bots`).
+2. Backend проверяет формат токена и сам токен (`getMe`), шифрует его AES-GCM (`ENCRYPTION_KEY`) и сохраняет. Один и тот же бот не может быть подключён дважды (`tg_bot_id` уникален).
+3. В режиме `TG_MODE=webhook` backend в той же транзакции вызывает `setWebhook` с адресом `{PUBLIC_URL}/tg/webhook/{bot_id}` и `secret_token`; если Telegram отказал, бот не сохраняется. Входящие вебхуки проверяются по заголовку `X-Telegram-Bot-Api-Secret-Token`.
+4. Публикуется `BotActivated`. Выключение (`PATCH is_active=false`) и удаление снимают вебхук и публикуют `BotDeactivated`; по этим событиям контекст `telegram` запускает и останавливает приём апдейтов. Смена токена (после `/revoke` в @BotFather) — `PATCH token`, принимается только токен того же бота.
+
+Один процесс обслуживает сколько угодно ботов. Для локальной разработки — режим long polling (`TG_MODE=polling`, по умолчанию): HTTPS не нужен, вебхуки не ставятся. `TG_MODE=webhook` требует `PUBLIC_URL` с `https://`, иначе приложение не стартует.
 
 ### 5.2 Ответ клиенту (RAG)
-1. Приходит апдейт → находим или создаём `customer` и активный `conversation`, сохраняем сообщение и публикуем событие.
+Участвуют `telegram` (приём и отправка), `conversation` (сценарий целиком), `rag` и `knowledge` (поиск и ответ). `conversation` объявляет порты `AnswerProvider` и `Sender`, `main.go` подставляет в них `rag` и `telegram`.
+
+1. Приходит апдейт → находим или создаём `customer` и активный `conversation`, сохраняем сообщение и в той же транзакции публикуем `MessageCreated` (подписчики получат его после коммита).
 2. Если статус `operator` или `waiting_operator`, бот молчит: сообщение просто появляется у оператора.
 3. Иначе:
    - **Эмбеддинг** вопроса (с учётом 2–3 последних реплик).
-   - **Гибридный поиск** в `chunks`: `top-k=5` по косинусной близости плюс полнотекстовый поиск по `tsvector`. Оба результата объединяются через Reciprocal Rank Fusion.
-   - **Если ничего релевантного не нашлось** (близость ниже `handoff_threshold`) или клиент просит «человека/оператора», статус меняется на `waiting_operator`. Клиент получает «Передаю специалисту», операторы — уведомление.
+   - **Гибридный поиск** в `chunks` (сервис `knowledge`, `rag` к таблице не обращается): `top-k=5` по косинусной близости плюс полнотекстовый поиск по `tsvector`. Оба результата объединяются через Reciprocal Rank Fusion.
+   - **Если ничего релевантного не нашлось** (близость ниже `handoff_threshold`) или клиент просит «человека/оператора», статус меняется на `waiting_operator` (событие `ConversationStatusChanged`). Клиент получает «Передаю специалисту», операторы — уведомление. Так же поступаем, если модель недоступна (`llm.ErrUnavailable`).
    - **Промпт:** системная инструкция («отвечай ТОЛЬКО по контексту; если ответа нет — скажи об этом») + чанки + история + вопрос.
    - **Ответ модели** отправляется в Telegram (с `sendChatAction typing`). В `messages.sources` сохраняются id использованных чанков, чтобы оператор видел, на чём основан ответ.
 
 ### 5.3 Индексация базы знаний
-Загрузка файла создаёт `document(pending)` и задачу в river. Задача:
+Контекст `knowledge`. Загрузка файла в одной транзакции создаёт `document(pending)` и задачу river `knowledge.index`. Задача:
 - извлекает текст;
 - режет его на чанки по ~500 токенов с перекрытием 50 (сначала по абзацам, затем по размеру);
 - получает эмбеддинги пачками и записывает их в `chunks`;
 - переводит документ в статус `ready`.
 
 ### 5.4 Подключение оператора
-- В панели список диалогов с фильтрами по статусу и боту. Сообщения приходят в реальном времени через SSE (`GET /api/stream`, хаб рассылает события с учётом `tenant_id`).
+- В панели список диалогов с фильтрами по статусу и боту. Сообщения приходят в реальном времени через SSE (`GET /api/stream`): контекст `realtime` подписан на все события шины и рассылает их только сотрудникам того же `tenant_id`.
 - Кнопка **«Взять диалог»**: статус меняется на `operator`, в диалог записывается `assigned_user_id`, в историю — системное сообщение, клиенту можно отправить «К вам подключился специалист».
 - Сообщение оператора уходит как `POST /api/conversations/:id/messages` → Telegram `sendMessage` → сохраняется с `sender=operator`.
 - Кнопка **«Вернуть боту»** или **«Закрыть»**.
@@ -176,7 +205,7 @@ verdicts       (id, conversation_id, resolved bool,
 Блокировка от двойного захвата: `UPDATE conversations SET status='operator', assigned_user_id=$1 WHERE id=$2 AND status<>'operator'`.
 
 ### 5.5 Вердикт
-Вердикт выносится при закрытии диалога: вручную или задачей river после N минут неактивности (например, 30). Модуль `verdict` отправляет модели всю переписку и просит вернуть JSON по схеме (у Ollama есть параметр `format` с JSON-схемой):
+Вердикт выносится при закрытии диалога: вручную или периодической задачей river (контекст `conversation`) после N минут неактивности (например, 30). Закрытие публикует `ConversationClosed`; контекст `verdict` подписан на него и ставит задачу river `verdict.generate` (с ретраями при сбое модели). Задача отправляет модели всю переписку и просит вернуть JSON по схеме (у Ollama есть параметр `format` с JSON-схемой):
 ```json
 {"resolved": true, "category": "доставка", "sentiment": "neutral",
  "summary": "Клиент уточнял сроки доставки, бот ответил по базе знаний",
@@ -188,7 +217,10 @@ verdicts       (id, conversation_id, resolved bool,
 ```
 POST   /api/auth/register | login | logout        GET /api/me
 POST   /api/auth/verify | resend                 # подтверждение email кодом
-GET    /api/bots           POST /api/bots          PATCH/DELETE /api/bots/:id
+GET    /api/bots | /api/bots/:id                # все сотрудники; токен и секрет не отдаются
+POST   /api/bots  {token, system_prompt?, greeting?, handoff_threshold?}          # owner
+PATCH  /api/bots/:id  {token?, system_prompt?, greeting?, handoff_threshold?, is_active?}  # owner
+DELETE /api/bots/:id                             # owner
 GET    /api/documents      POST /api/documents (multipart)   DELETE /api/documents/:id
 POST   /api/rag/test       # «песочница»: задать вопрос и увидеть ответ и найденные чанки
 GET    /api/conversations?status=&bot_id=&q=&page=
@@ -213,7 +245,7 @@ GET    /healthz
 
 | # | Этап | Результат | Срок* |
 |---|---|---|---|
-| 0 | Каркас | репозиторий, Docker Compose (app+pg+ollama), goose, sqlc, конфиг, healthz, Vite-проект, встраивание статики | 3–4 дня |
+| 0 | Каркас | репозиторий, Docker Compose (app+pg+ollama), goose, sqlc, конфиг, healthz, Vite-проект, встраивание статики; DDD-слои и `archtest`; платформа: `TxManager`, `eventbus`, `jobs` (river), `llm/ollama` | 3–4 дня |
 | 1 | Auth и tenants | регистрация, JWT, роли, middleware для `tenant_id`, страница входа | 3–4 дня |
 | 1.5 | Подтверждение email | `mailer` (SMTP / лог), коды подтверждения, ограничение попыток, экран ввода кода | 1–2 дня |
 | 2 | Telegram | подключение бота, вебхук или polling, сохранение клиентов и сообщений, эхо-ответ | 3–4 дня |
