@@ -1,5 +1,6 @@
 // Package db — пул соединений PostgreSQL и применение миграций.
-// Код запросов генерируется sqlc в подпакет store (см. sqlc.yaml).
+// Запросы каждый контекст держит у себя: internal/<контекст>/infra/postgres
+// (sqlc генерирует код в sqlcgen, см. sqlc.yaml). Транзакции — tx.go.
 package db
 
 import (

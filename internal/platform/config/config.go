@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -24,11 +25,16 @@ type Config struct {
 	SMTPPassword string `env:"SMTP_PASSWORD"`
 	SMTPFrom     string `env:"SMTP_FROM" envDefault:"CloserAI <noreply@localhost>"`
 
-	TelegramMode string `env:"TG_MODE" envDefault:"webhook"` // webhook | polling
+	TelegramMode string `env:"TG_MODE" envDefault:"polling"` // webhook (нужен HTTPS) | polling
+	// TG_API_URL — свой сервер Bot API; пусто — https://api.telegram.org.
+	TelegramAPIURL string `env:"TG_API_URL"`
 
 	OllamaURL     string `env:"OLLAMA_URL" envDefault:"http://localhost:11434"`
 	LLMChatModel  string `env:"LLM_CHAT_MODEL" envDefault:"qwen2.5:3b-instruct"`
 	LLMEmbedModel string `env:"LLM_EMBED_MODEL" envDefault:"bge-m3"`
+
+	// Фоновые задачи (river): сколько выполняется одновременно.
+	JobsMaxWorkers int `env:"JOBS_MAX_WORKERS" envDefault:"4"`
 }
 
 func Load() (Config, error) {
@@ -38,6 +44,11 @@ func Load() (Config, error) {
 	}
 	if cfg.TelegramMode != "webhook" && cfg.TelegramMode != "polling" {
 		return Config{}, fmt.Errorf("config: TG_MODE must be webhook or polling, got %q", cfg.TelegramMode)
+	}
+	// Telegram принимает вебхуки только на HTTPS-адрес.
+	if cfg.TelegramMode == "webhook" && !strings.HasPrefix(cfg.PublicURL, "https://") {
+		return Config{}, fmt.Errorf("config: TG_MODE=webhook требует PUBLIC_URL с https://, сейчас %q "+
+			"(для локальной разработки используйте TG_MODE=polling)", cfg.PublicURL)
 	}
 	return cfg, nil
 }

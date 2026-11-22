@@ -38,3 +38,19 @@ sql:
       go:
         <<: *go
         out: internal/tenant/infra/postgres/sqlcgen
+
+  - engine: postgresql
+    schema: db/migrations
+    queries: internal/bot/infra/postgres/queries
+    gen:
+      go:
+        <<: *go
+        out: internal/bot/infra/postgres/sqlcgen
+
+  - engine: postgresql
+    schema: db/migrations
+    queries: internal/conversation/infra/postgres/queries
+    gen:
+      go:
+        <<: *go
+        out: internal/conversation/infra/postgres/sqlcgen

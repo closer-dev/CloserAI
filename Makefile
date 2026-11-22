@@ -1,9 +1,11 @@
 -include .env
 export
 
+TEST_DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/closer_ai_test?sslmode=disable
+
 COMPOSE := docker compose -f deploy/docker-compose.yml --env-file .env
 
-.PHONY: help env deps-up deps-down models dev-api dev-api-watch dev-web web-build build up down logs sqlc migration test vet
+.PHONY: help env deps-up deps-down models dev-api dev-api-watch dev-web web-build build up down logs sqlc migration test test-int vet
 
 help: ## Список команд
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -57,8 +59,12 @@ sqlc: ## Сгенерировать Go-код sqlc для всех контек�
 migration: ## Создать миграцию: make migration name=add_something
 	go run github.com/pressly/goose/v3/cmd/goose@latest -dir db/migrations create $(name) sql
 
-test: ## Тесты
+test: ## Юнит-тесты (интеграционные пропускаются без TEST_DATABASE_URL)
 	go test ./...
+
+test-int: ## Все тесты, включая интеграционные (нужен make deps-up; база closer_ai_test)
+	$(COMPOSE) exec -T postgres sh -c 'psql -U $$POSTGRES_USER -tc "SELECT 1 FROM pg_database WHERE datname = '"'"'closer_ai_test'"'"'" | grep -q 1 || createdb -U $$POSTGRES_USER closer_ai_test'
+	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -count=1 ./...
 
 vet: ## Статический анализ
 	go vet ./...
