@@ -32,6 +32,10 @@ type Module struct {
 }
 
 func New(d Deps) (*Module, error) {
+	notifier, err := notify.NewEmail(d.Mailer)
+	if err != nil {
+		return nil, err
+	}
 	svc, err := app.NewService(app.Deps{
 		Tx:       d.Tx,
 		Users:    postgres.NewUserRepository(d.Pool),
@@ -40,7 +44,7 @@ func New(d Deps) (*Module, error) {
 		Hasher:   security.Bcrypt{},
 		Tokens:   security.NewJWT(d.JWTSecret),
 		CodeGen:  security.NewHMACCodes(d.JWTSecret),
-		Notifier: notify.NewEmail(d.Mailer),
+		Notifier: notifier,
 	})
 	if err != nil {
 		return nil, err

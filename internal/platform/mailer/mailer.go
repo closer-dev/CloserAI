@@ -7,11 +7,14 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/mail"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"time"
 )
@@ -19,7 +22,8 @@ import (
 type Message struct {
 	To      string
 	Subject string
-	Text    string
+	Text    string // текст письма и резервная версия для клиентов без HTML
+	HTML    string // необязательная HTML-версия
 }
 
 type Sender interface {
@@ -61,6 +65,10 @@ func (s *SMTPSender) Send(ctx context.Context, m Message) error {
 	to, err := mail.ParseAddress(m.To)
 	if err != nil {
 		return fmt.Errorf("mailer: bad recipient: %w", err)
+	}
+	raw, err := build(s.from, to, m, time.Now())
+	if err != nil {
+		return fmt.Errorf("mailer: build message: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -113,7 +121,7 @@ func (s *SMTPSender) Send(ctx context.Context, m Message) error {
 	if err != nil {
 		return fmt.Errorf("mailer: DATA: %w", err)
 	}
-	if _, err := w.Write(build(s.from, to, m, time.Now())); err != nil {
+	if _, err := w.Write(raw); err != nil {
 		return fmt.Errorf("mailer: write: %w", err)
 	}
 	if err := w.Close(); err != nil {
@@ -122,22 +130,52 @@ func (s *SMTPSender) Send(ctx context.Context, m Message) error {
 	return c.Quit()
 }
 
-// build собирает письмо: UTF-8, тема в MIME-кодировке, тело в base64.
-func build(from, to *mail.Address, m Message, now time.Time) []byte {
+// build собирает текстовое письмо или multipart/alternative, если задан HTML.
+func build(from, to *mail.Address, m Message, now time.Time) ([]byte, error) {
+	const textType = "text/plain; charset=utf-8"
+	const htmlType = "text/html; charset=utf-8"
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "From: %s\r\n", from.String())
 	fmt.Fprintf(&b, "To: %s\r\n", to.String())
 	fmt.Fprintf(&b, "Subject: %s\r\n", mime.BEncoding.Encode("utf-8", m.Subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", now.Format(time.RFC1123Z))
 	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-	b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+	if m.HTML == "" {
+		fmt.Fprintf(&b, "Content-Type: %s\r\nContent-Transfer-Encoding: base64\r\n\r\n", textType)
+		err := writeBase64(&b, m.Text)
+		return b.Bytes(), err
+	}
 
-	enc := base64.StdEncoding.EncodeToString([]byte(m.Text))
+	w := multipart.NewWriter(&b)
+	fmt.Fprintf(&b, "Content-Type: %s\r\n\r\n",
+		mime.FormatMediaType("multipart/alternative", map[string]string{"boundary": w.Boundary()}))
+	// Клиент выбирает последнюю поддерживаемую версию, поэтому HTML после текста.
+	for _, part := range []struct{ contentType, body string }{{textType, m.Text}, {htmlType, m.HTML}} {
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Type", part.contentType)
+		h.Set("Content-Transfer-Encoding", "base64")
+		p, err := w.CreatePart(h)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeBase64(p, part.body); err != nil {
+			return nil, err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+func writeBase64(w io.Writer, body string) error {
+	enc := base64.StdEncoding.EncodeToString([]byte(body))
 	for len(enc) > 76 {
-		b.WriteString(enc[:76] + "\r\n")
+		if _, err := io.WriteString(w, enc[:76]+"\r\n"); err != nil {
+			return err
+		}
 		enc = enc[76:]
 	}
-	b.WriteString(enc + "\r\n")
-	return b.Bytes()
+	_, err := io.WriteString(w, enc+"\r\n")
+	return err
 }

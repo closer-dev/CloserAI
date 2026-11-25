@@ -5,9 +5,9 @@
 // Семантика:
 //   - Publish внутри TxManager.Do откладывает доставку до коммита; при откате
 //     события не доставляются. Вне транзакции доставка сразу.
-//   - Обработчики вызываются синхронно, по очереди, в порядке подписки.
-//     Поэтому они должны быть быстрыми: долгую работу (вызов LLM, отправку
-//     в Telegram) обработчик ставит в очередь задач (platform/jobs).
+//   - Для каждого события обработчики вызываются синхронно в порядке подписки,
+//     включая SubscribeAll. Разные публикации могут выполняться параллельно.
+//     Долгую работу (LLM, Telegram) обработчик ставит в очередь platform/jobs.
 //   - Ошибка или паника обработчика логируется и не мешает остальным:
 //     данные уже закоммичены, откатывать публикацию поздно.
 //
@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"closerai/internal/kernel"
@@ -28,16 +29,21 @@ import (
 // который пересылает всё подряд в браузер).
 type Handler func(ctx context.Context, e kernel.Event) error
 
+type subscription struct {
+	name    string
+	all     bool
+	handler Handler
+}
+
 type Bus struct {
 	log *slog.Logger
 
-	mu     sync.RWMutex
-	byName map[string][]Handler
-	all    []Handler
+	mu   sync.RWMutex
+	subs []subscription
 }
 
 func New(log *slog.Logger) *Bus {
-	return &Bus{log: log, byName: map[string][]Handler{}}
+	return &Bus{log: log}
 }
 
 // Subscribe подписывает типизированный обработчик на события типа E:
@@ -46,22 +52,24 @@ func New(log *slog.Logger) *Bus {
 func Subscribe[E kernel.Event](b *Bus, h func(ctx context.Context, e E) error) {
 	var zero E
 	name := zero.EventName()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.byName[name] = append(b.byName[name], func(ctx context.Context, e kernel.Event) error {
+	b.subscribe(subscription{name: name, handler: func(ctx context.Context, e kernel.Event) error {
 		typed, ok := e.(E)
 		if !ok {
 			return fmt.Errorf("eventbus: событие %q имеет тип %T, а подписчик ждёт %T", name, e, zero)
 		}
 		return h(ctx, typed)
-	})
+	}})
 }
 
 // SubscribeAll подписывает обработчик на все события.
 func (b *Bus) SubscribeAll(h Handler) {
+	b.subscribe(subscription{all: true, handler: h})
+}
+
+func (b *Bus) subscribe(sub subscription) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.all = append(b.all, h)
+	b.subs = append(b.subs, sub)
 }
 
 // Publish доставляет события подписчикам: после коммита текущей транзакции
@@ -71,6 +79,8 @@ func (b *Bus) Publish(ctx context.Context, events ...kernel.Event) {
 	if len(events) == 0 {
 		return
 	}
+	// При отложенной доставке вызывающий код может переиспользовать исходный срез.
+	events = slices.Clone(events)
 	db.AfterCommit(ctx, func(ctx context.Context) {
 		for _, e := range events {
 			b.dispatch(ctx, e)
@@ -79,10 +89,14 @@ func (b *Bus) Publish(ctx context.Context, events ...kernel.Event) {
 }
 
 func (b *Bus) dispatch(ctx context.Context, e kernel.Event) {
+	name := e.EventName()
 	b.mu.RLock()
-	handlers := make([]Handler, 0, len(b.byName[e.EventName()])+len(b.all))
-	handlers = append(handlers, b.byName[e.EventName()]...)
-	handlers = append(handlers, b.all...)
+	var handlers []Handler
+	for _, sub := range b.subs {
+		if sub.all || sub.name == name {
+			handlers = append(handlers, sub.handler)
+		}
+	}
 	b.mu.RUnlock()
 
 	for _, h := range handlers {
